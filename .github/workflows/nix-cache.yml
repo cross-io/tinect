@@ -1,0 +1,104 @@
+name: Publish Nix cache
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Cache release channel
+        required: true
+        type: choice
+        options:
+          - dev
+          - rc
+          - prod
+        default: dev
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    name: ${{ matrix.system }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Check out the Nix cache upload client
+        uses: actions/checkout@v5
+        with:
+          repository: cross-io/nix-cache-worker
+          ref: master
+          path: .nix-cache-worker
+          sparse-checkout: |
+            bin/nix-cache-upload
+          sparse-checkout-cone-mode: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ github.token }}
+          extra_nix_config: |
+            extra-experimental-features = nix-command flakes
+
+      - name: Verify runner system
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_system="$(nix eval --raw --impure --expr 'builtins.currentSystem')"
+          printf 'runner_system=%s\n' "$actual_system"
+          if [[ "$actual_system" != "${{ matrix.system }}" ]]; then
+            echo "runner system does not match the matrix entry" >&2
+            exit 1
+          fi
+
+      - name: Configure cache signing key
+        shell: bash
+        env:
+          NIX_CACHE_SIGNING_KEY_FROM_SECRET: ${{ secrets.NIX_CACHE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          signing_key="${NIX_CACHE_SIGNING_KEY_FROM_SECRET:-}"
+          if [[ -z "$signing_key" ]]; then
+            echo "NIX_CACHE_SIGNING_KEY is not configured as a GitHub secret" >&2
+            exit 1
+          fi
+          key_file="$RUNNER_TEMP/tinect-cache-signing-key.sec"
+          umask 077
+          if [[ "$signing_key" == *:* ]]; then
+            printf '%s\n' "$signing_key" >"$key_file"
+          else
+            printf 'nix-cache.ihc.im:%s\n' "$signing_key" >"$key_file"
+          fi
+          echo "NIX_CACHE_SECRET_KEY_FILE=$key_file" >>"$GITHUB_ENV"
+
+      - name: Build and publish closure
+        shell: bash
+        env:
+          NIX_CACHE_URL: https://nix-cache.ihc.im
+          NIX_CACHE_UPLOAD_COMMAND: ${{ github.workspace }}/.nix-cache-worker/bin/nix-cache-upload
+          NIX_CACHE_WRITE_TOKEN_FROM_SECRET: ${{ secrets.NIX_CACHE_WRITE_TOKEN }}
+          NIX_CACHE_TAGS_JSON: >-
+            {"channel":"${{ inputs.channel || 'dev' }}","system":"${{ matrix.system }}"}
+        run: |
+          set -euo pipefail
+          cache_password="${NIX_CACHE_WRITE_TOKEN_FROM_SECRET:-}"
+          if [[ -z "$cache_password" ]]; then
+            echo "NIX_CACHE_WRITE_TOKEN is not configured as a GitHub secret" >&2
+            exit 1
+          fi
+          NIX_CACHE_PASSWORD="$cache_password" \
+            nix shell nixpkgs#curl nixpkgs#gawk nixpkgs#jq --command scripts/build-and-push-nix-cache.sh

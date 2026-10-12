@@ -1,0 +1,21 @@
+id: laptop
+identity_key_path: ./node.key
+listen: "quic://127.0.0.1:4433"
+# Optional custom DNS upstreams for peer endpoints.
+# Omit the port to use 53; all custom servers failing falls back to system DNS.
+# dns_servers: ["10.0.0.53", "[2001:db8::53]:5353"]
+tun:
+  name: tinect0
+  addresses: [100.64.0.10/32]
+# Optional Linux local egress. Explicit routes rank with peer routes, while
+# fallback permits local egress only after all matching peers are unavailable.
+# With managed_routes enabled (the default) Tinect also installs the matching
+# POSTROUTING masquerade automatically. ctnetlink removes the first-pass flow,
+# then the reinjected original direction uses the reserved conntrack zone.
+direct:
+  fallback: true
+  dscp: 46
+  fwmark: 0x100
+  conntrack_zone: 32123
+  routes: []
+peers: {}

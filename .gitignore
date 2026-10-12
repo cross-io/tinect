@@ -1,0 +1,15 @@
+/target/
+*.key
+*.sock
+*.pub
+/deployments
+.direnv/
+__pycache__/
+*.pyc
+
+# Local SSH credentials
+/.ssh/
+
+# Coverage
+.coverage-missing*
+lcov-*.info

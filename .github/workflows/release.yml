@@ -1,0 +1,194 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-apple-darwin
+            asset: tinect-x86_64-apple-darwin
+            static_linux: false
+            zigbuild: true
+          - runner: ubuntu-24.04
+            target: aarch64-apple-darwin
+            asset: tinect-aarch64-apple-darwin
+            static_linux: false
+            zigbuild: true
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            asset: tinect-x86_64-unknown-linux-musl
+            static_linux: true
+            zigbuild: false
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: tinect-aarch64-unknown-linux-musl
+            static_linux: true
+            zigbuild: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Set package version from release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          if [[ "$version" == "$RELEASE_TAG" ]]; then
+            echo "release tag must start with v: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag does not contain a valid Cargo version: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          sed -i.bak -E "s/^version = \"[^\"]+\"$/version = \"$version\"/" Cargo.toml
+          rm Cargo.toml.bak
+          cargo metadata --no-deps --format-version 1 >/dev/null
+          echo "building tinect version $version from tag $RELEASE_TAG"
+      - name: Build static Linux netfilter libraries
+        if: matrix.static_linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential bzip2 curl linux-libc-dev musl-tools xz-utils
+
+          workdir="$RUNNER_TEMP/tinect-static-libs"
+          prefix="$workdir/native"
+          host="$(uname -m)-linux-musl"
+          multiarch="$(gcc -print-multiarch)"
+          mkdir -p "$workdir/linux-uapi"
+          cp -a /usr/include/linux /usr/include/asm-generic \
+            "/usr/include/$multiarch/asm" "$workdir/linux-uapi/"
+          cd "$workdir"
+          curl --fail --location --remote-name https://netfilter.org/projects/libmnl/files/libmnl-1.0.5.tar.bz2
+          curl --fail --location --remote-name https://netfilter.org/projects/libnftnl/files/libnftnl-1.3.1.tar.xz
+          tar -xf libmnl-1.0.5.tar.bz2
+          tar -xf libnftnl-1.3.1.tar.xz
+
+          cd libmnl-1.0.5
+          CFLAGS="-I$workdir/linux-uapi" CC=musl-gcc ./configure --host="$host" --disable-shared --enable-static --prefix="$prefix"
+          make -j"$(nproc)"
+          make install
+
+          cd ../libnftnl-1.3.1
+          PKG_CONFIG_PATH="$prefix/lib/pkgconfig" CFLAGS="-I$workdir/linux-uapi" CC=musl-gcc ./configure --host="$host" --disable-shared --enable-static --prefix="$prefix"
+          make -j"$(nproc)"
+          make install
+      - name: Build release binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+          STATIC_LINUX: ${{ matrix.static_linux }}
+          ZIGBUILD: ${{ matrix.zigbuild }}
+        run: |
+          set -euo pipefail
+          if [ "$STATIC_LINUX" = true ]; then
+            prefix="$RUNNER_TEMP/tinect-static-libs/native"
+            target_env="$(echo "$TARGET" | tr '[:lower:]-' '[:upper:]_')"
+            export "CC_${target_env}=musl-gcc"
+            # Rust's musl target supplies its own CRT.  Using musl-gcc as the
+            # final linker injects crt1.o, whose C `main` entry is unresolved
+            # for a Rust binary and produces an executable that faults at
+            # _start.  Keep musl-gcc for the C netfilter libraries above, but
+            # let rust-lld link the Rust executable.
+            export "CARGO_TARGET_${target_env}_LINKER=rust-lld"
+            export LIBMNL_LIB_DIR="$prefix/lib"
+            export LIBNFTNL_LIB_DIR="$prefix/lib"
+            export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static -C link-arg=--start-group -C link-arg=-lmnl -C link-arg=-lnftnl -C link-arg=--end-group"
+          fi
+          if [ "$ZIGBUILD" = true ]; then
+            docker run --rm -v "$GITHUB_WORKSPACE:/io" -w /io \
+              ghcr.io/ihciah/cargo-zigbuild:rust-1.99.0 \
+              cargo zigbuild --release --target "$TARGET"
+          else
+            cargo build --release --target "$TARGET"
+          fi
+          mkdir -p dist
+          cp "target/$TARGET/release/tinect" "dist/$ASSET"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: release-assets/*
+
+  docker:
+    name: Publish container image
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download Linux release binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tinect-*-unknown-linux-musl
+          path: release-assets
+          merge-multiple: true
+      - name: Prepare Docker build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docker-context/dist
+          cp Dockerfile.ghcr docker-context/Dockerfile
+          cp release-assets/tinect-x86_64-unknown-linux-musl docker-context/dist/tinect-linux-amd64
+          cp release-assets/tinect-aarch64-unknown-linux-musl docker-context/dist/tinect-linux-arm64
+          chmod 0755 docker-context/dist/tinect-linux-amd64 docker-context/dist/tinect-linux-arm64
+          file docker-context/dist/tinect-linux-amd64 docker-context/dist/tinect-linux-arm64
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Extract image metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=raw,value=latest
+      - name: Build and push multi-architecture image
+        uses: docker/build-push-action@v7
+        with:
+          context: docker-context
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}

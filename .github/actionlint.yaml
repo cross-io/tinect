@@ -1,0 +1,4 @@
+paths:
+  .github/workflows/ci.yml:
+    ignore:
+      - SC2024

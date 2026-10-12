@@ -1,0 +1,30 @@
+# C：示例出口，只允许 A 经 B 转发。
+# Replace the example endpoint with an address reachable from this node.
+id: C
+accept_connections: true
+identity_key: REPLACE_WITH_BASE64_NO_PAD_ED25519_PRIVATE_KEY
+listen: "quic://0.0.0.0:27777"
+tun:
+  name: tinect0
+  addresses: [192.168.233.3/24]
+  mtu: 1280
+peers:
+  A:
+    public_key: 8J+90xtlXjoBDPDFwvdZklwJTeQULH4rAv44wuy4rvI
+    endpoints: [quic://a.example.invalid:27777]
+    routes:
+      - { ip_cidr: 192.168.233.1/32, priority: 100, bind: true }
+    paths:
+      - path: [C, B, A]
+  B:
+    public_key: dc6sTAK2MATlMaZreuBjIMFauXc/1Ti27qlOIT9YOds
+    endpoints: []
+    routes:
+      - { ip_cidr: 192.168.233.2/32, priority: 100, bind: true }
+connect_to: [A]
+allowed_routes:
+  - allow: [0.0.0.0/0, '::/0']
+    for: [A]
+allowed_local_ports:
+  - { allow: [all], for: [A] }
+  - { allow: [icmp], for: any_known }

@@ -1,0 +1,26 @@
+# B：只做中继；没有 peers.*.routes/allowed_routes，因此不会安装覆盖路由。
+# endpoints 就是 ConnectTo：B 主动建立到 A、C 的 QUIC Link。
+id: B
+accept_connections: true
+allow_transit: true
+# Generate a unique key with `tinect keygen` and configure the private value locally.
+identity_key: REPLACE_WITH_BASE64_NO_PAD_ED25519_PRIVATE_KEY
+# B only dials out; its carrier socket is derived from connect_to.
+tun:
+  name: tinect0
+  addresses: [192.168.233.2/24]
+  mtu: 1280
+peers:
+  A:
+    public_key: 8J+90xtlXjoBDPDFwvdZklwJTeQULH4rAv44wuy4rvI
+    endpoints: [quic://a.example.invalid:27777]
+    allow_relay: true
+    routes:
+      - { ip_cidr: 192.168.233.1/32, priority: 100, bind: true }
+  C:
+    public_key: /4Vo6gk2tPD6P0GlxIfjnLpaKZLeIjThczav3KLUhlg
+    endpoints: [quic://c.example.invalid:27777]
+    allow_relay: true
+    routes:
+      - { ip_cidr: 192.168.233.3/32, priority: 100, bind: true }
+connect_to: [A, C]

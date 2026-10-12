@@ -1,0 +1,18 @@
+services:
+  tinect:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tinect:local
+    command: ["up", "/etc/tinect/config.yaml"]
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/etc/tinect/config.yaml:ro
+
+# `up` changes the host network namespace because this service uses host
+# networking. Review the configuration with `tinect up --dry-run` first.

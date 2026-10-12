@@ -1,0 +1,22 @@
+[Unit]
+Description=Tinect programmable Overlay network
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tinect up /etc/tinect/config.yaml
+Restart=on-failure
+RestartSec=3
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+# NOTE: ProtectHome blocks identity_key_path under /home or ~. Keep keys in
+# /etc/tinect (with ReadWritePaths for /run/tinect and /etc/tinect) or relax
+# this line when the key lives under a home directory.
+ProtectHome=true
+ReadWritePaths=/run/tinect /etc/tinect
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

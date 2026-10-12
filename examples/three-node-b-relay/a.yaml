@@ -1,0 +1,36 @@
+# A：业务入口。B 的 peers.A.endpoints 决定由 B 主动拨号。
+id: A
+accept_connections: true
+# Generate a unique key with `tinect keygen` and configure the private value locally.
+identity_key: REPLACE_WITH_BASE64_NO_PAD_ED25519_PRIVATE_KEY
+listen: "quic://0.0.0.0:27777"
+managed_routes: false
+connect_to: [C]
+# 本机流量在 nft output 打 mark 后才被重路由进 TUN，源地址仍可能是 underlay。
+# 将其改写为 A 的 overlay 地址，确保 C 出口的回包经 Tinect 返回。
+post_up:
+  - 'nft add table ip tinect_a_local_nat'
+  - 'nft "add chain ip tinect_a_local_nat postrouting { type nat hook postrouting priority srcnat; policy accept; }"'
+  - 'nft add rule ip tinect_a_local_nat postrouting oifname "$TINECT_TUN" masquerade'
+pre_down:
+  - 'nft delete table ip tinect_a_local_nat'
+tun:
+  name: tinect0
+  addresses: [192.168.233.1/24]
+  mtu: 1280
+peers:
+  B:
+    public_key: dc6sTAK2MATlMaZreuBjIMFauXc/1Ti27qlOIT9YOds
+    endpoints: []
+    routes:
+      - { ip_cidr: 192.168.233.2/32, priority: 100, bind: true }
+  C:
+    public_key: /4Vo6gk2tPD6P0GlxIfjnLpaKZLeIjThczav3KLUhlg
+    endpoints: [quic://c.example.invalid:27777]
+    routes:
+      - { ip_cidr: 192.168.233.3/32, priority: 100, bind: true }
+      - { ip_cidr: 8.8.8.8/32, priority: 100 }
+      - { ip_cidr: 0.0.0.0/0, priority: 100 }
+    paths:
+      - path: [A, B, C]
+      - path: [A, C]

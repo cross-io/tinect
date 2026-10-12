@@ -1,0 +1,28 @@
+[package]
+name = "tinect-fake-tcp"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Pure packet codec and minimal fake-TCP state machine for QUIC datagrams"
+repository = "https://github.com/cross-io/tinect"
+keywords = ["quic", "tcp", "obfuscation", "udp"]
+categories = ["network-programming"]
+
+[dependencies]
+hmac = "0.13.0"
+sha2 = "0.11.0"
+
+[features]
+# Only enables the Linux raw-socket test endpoint example. The library itself
+# remains free of socket and device I/O.
+raw-test = ["dep:libc"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2.189", optional = true }
+
+[[example]]
+name = "nat-endpoint"
+required-features = ["raw-test"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }

@@ -1,0 +1,399 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl libmnl-dev pkg-config shellcheck xz-utils
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install compatible libnftnl
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d "$RUNNER_TEMP/libnftnl.XXXXXX")"
+          trap 'rm -rf "$workdir"' EXIT
+          curl --fail --location --output "$workdir/libnftnl.tar.xz" \
+            https://netfilter.org/projects/libnftnl/files/libnftnl-1.3.1.tar.xz
+          tar -xf "$workdir/libnftnl.tar.xz" -C "$workdir"
+          cd "$workdir/libnftnl-1.3.1"
+          ./configure --prefix=/usr/local
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --release
+      - name: Validate integration test scripts
+        run: |
+          bash -n tests/*.sh tests/lib/remote.sh
+          # Test daemons deliberately run under sudo while their logs stay
+          # user-owned. Dynamic `$PWD` imports and short-circuit cleanup
+          # guards are intentionally used across the existing fixtures; keep
+          # ShellCheck for diagnostics outside those established patterns.
+          shellcheck -x -e SC1090,SC1091,SC2015,SC2024,SC2034,SC2329 tests/*.sh tests/lib/remote.sh
+      - name: Build release test binaries
+        run: |
+          cargo build --release --features integration-test-timing
+          # `remote_fake_tcp_nat.sh` runs with sudo, whose secure PATH does
+          # not include rustup's cargo. Build its endpoint once with quality.
+          cargo build --release -p tinect-fake-tcp --example nat-endpoint --features raw-test
+          mkdir -p /tmp/tinect-release-binaries/release/examples
+          cp target/release/tinect /tmp/tinect-release-binaries/release/tinect
+          cp target/release/examples/nat-endpoint /tmp/tinect-release-binaries/release/examples/nat-endpoint
+      - name: Upload release test binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: tinect-release-binaries
+          path: /tmp/tinect-release-binaries
+          retention-days: 1
+          if-no-files-found: error
+
+  coverage:
+    name: Rust coverage
+    runs-on: ubuntu-24.04
+    needs: quality
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install coverage build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl gnupg jq libmnl-dev pkg-config xz-utils
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install compatible libnftnl
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d "$RUNNER_TEMP/libnftnl.XXXXXX")"
+          trap 'rm -rf "$workdir"' EXIT
+          curl --fail --location --output "$workdir/libnftnl.tar.xz" \
+            https://netfilter.org/projects/libnftnl/files/libnftnl-1.3.1.tar.xz
+          tar -xf "$workdir/libnftnl.tar.xz" -C "$workdir"
+          cd "$workdir/libnftnl-1.3.1"
+          ./configure --prefix=/usr/local
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+      - name: Generate coverage reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset LLVM_COV LLVM_PROFDATA
+          cargo install cargo-llvm-cov --locked
+          cargo fetch --locked
+          coverage_target="$RUNNER_TEMP/tinect-coverage-target"
+          sudo -n rm -rf -- "$coverage_target" "$GITHUB_WORKSPACE/target"
+          mkdir -p "$coverage_target"
+          export CARGO_TARGET_DIR="$coverage_target"
+          cleanup_coverage_artifacts() {
+            sudo -n rm -rf -- "$coverage_target" "$GITHUB_WORKSPACE/target" 2>/dev/null || true
+          }
+          trap cleanup_coverage_artifacts EXIT
+          sudo -n -E env \
+            HOME="$HOME" \
+            PATH="$HOME/.cargo/bin:$PATH" \
+            CARGO_TARGET_DIR="$coverage_target" \
+            TINECT_RUN_NETFILTER_TESTS=1 \
+            cargo llvm-cov \
+              --workspace \
+              --all-features \
+              --branch \
+              --no-report
+            sudo -n -E env \
+              HOME="$HOME" \
+              PATH="$HOME/.cargo/bin:$PATH" \
+              CARGO_TARGET_DIR="$coverage_target" \
+              cargo llvm-cov \
+              --workspace \
+              --all-features \
+              --branch \
+              --no-run \
+              --lcov \
+              --output-path lcov.info
+            sudo -n -E env \
+              HOME="$HOME" \
+              PATH="$HOME/.cargo/bin:$PATH" \
+              CARGO_TARGET_DIR="$coverage_target" \
+              cargo llvm-cov \
+              --workspace \
+              --all-features \
+              --branch \
+              --no-run \
+              --codecov \
+              --output-path codecov.json
+          sudo -n chmod a+r lcov.info codecov.json
+      - name: Upload coverage to Codecov
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: codecov/codecov-action@v6
+        with:
+          files: ./lcov.info,./codecov.json
+          flags: rust
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  network-integration:
+    runs-on: ubuntu-24.04
+    needs: quality
+    strategy:
+      fail-fast: false
+      # Every matrix entry owns its network namespaces, veths, TUN devices,
+      # sockets, and work directory.
+      max-parallel: 24
+      matrix:
+        include:
+          - name: auth-forwarding
+            path: tests/remote_auth_forwarding.sh
+          - name: circuit-feedback
+            path: tests/remote_circuit_feedback.sh
+          - name: circuit-feedback-loss
+            path: tests/remote_circuit_feedback.sh
+            timing_profile: circuit-fast
+          - name: auto-path
+            path: tests/remote_auto_path.sh
+          - name: exit-failover
+            path: tests/remote_exit_failover.sh
+          - name: fake-tcp-nat
+            path: tests/remote_fake_tcp_nat.sh
+          - name: fake-ip
+            path: tests/remote_fake_ip.sh
+          - name: fake-ip-multihop
+            path: tests/remote_fake_ip_multihop.sh
+          - name: fake-ip-direct-fallback
+            path: tests/remote_fake_ip_direct_fallback.sh
+          - name: fake-ip-direct-route
+            path: tests/remote_fake_ip_direct_route.sh
+          - name: multi-route
+            path: tests/remote_multi_route.sh
+          - name: pmtu-mss
+            path: tests/remote_pmtu_mss.sh
+          - name: mtu-mss-ptb-gso
+            path: tests/remote_mtu_mss_ptb_gso.sh
+          - name: datagram-fec
+            path: tests/remote_fec.sh
+            carrier: quic
+            require_recovery: true
+          - name: datagram-fec-quicfull
+            path: tests/remote_fec.sh
+            carrier: quicfull
+            require_recovery: false
+          - name: datagram-fec-quic-faketcp
+            path: tests/remote_fec.sh
+            carrier: quic-faketcp
+            require_recovery: false
+          - name: datagram-fec-quicfull-faketcp
+            path: tests/remote_fec.sh
+            carrier: quicfull-faketcp
+            require_recovery: false
+          - name: datagram-fec-multihop
+            path: tests/remote_fec_multihop.sh
+          - name: preferred-path-migration
+            path: tests/remote_preferred_path_migration.sh
+          - name: rfc0022-dynamic-budget
+            path: tests/remote_rfc0022_dynamic_budget.sh
+            timing_profile: maintenance-fast
+          - name: reconnect-path-switch
+            path: tests/remote_reconnect_path_switch.sh
+            timing_profile: topology-fast
+          - name: same-first-hop-switch
+            path: tests/remote_same_first_hop_switch.sh
+          - name: multi-destination-isolation
+            path: tests/remote_multi_destination_isolation.sh
+          - name: renewal-continuity
+            path: tests/remote_renewal_continuity.sh
+            timing_profile: circuit-fast
+          - name: renewal-continuity-production
+            path: tests/remote_renewal_continuity.sh
+          - name: relay-control-congestion
+            path: tests/remote_relay_control_congestion.sh
+            timing_profile: circuit-fast
+          - name: active-lease-continuity
+            path: tests/remote_active_lease_continuity.sh
+            timing_profile: circuit-fast
+          - name: open-candidate-fallback
+            path: tests/remote_open_candidate_fallback.sh
+          - name: loss-reorder-session
+            path: tests/remote_loss_reorder_session.sh
+          - name: quicp-ipv6-two-node
+            path: tests/remote_quicp_ipv6_two_node.sh
+          - name: quic-ipv6-two-node
+            path: tests/remote_quic_ipv6_two_node.sh
+          - name: quicfull-ipv6-two-node
+            path: tests/remote_quicfull_ipv6_two_node.sh
+          - name: quicfull-faketcp-ipv6-two-node
+            path: tests/remote_quicfull_faketcp_ipv6_two_node.sh
+          - name: quicfull-two-node
+            path: tests/remote_quicfull_two_node.sh
+          - name: quicfull-faketcp-two-node
+            path: tests/remote_quicfull_faketcp_two_node.sh
+          - name: bare-udp-reconnect
+            path: tests/remote_bare_udp_reconnect.sh
+          - name: quic-mixed-address-family-two-node
+            path: tests/remote_quic_mixed_address_family_two_node.sh
+          - name: quic-mixed-flood-two-node
+            path: tests/remote_quic_mixed_flood_two_node.sh
+          - name: quicp-two-node
+            path: tests/remote_quicp_two_node.sh
+          - name: two-node
+            path: tests/remote_two_node.sh
+          - name: healthy-nft-set
+            path: tests/remote_two_node.sh
+            healthy_nft: true
+          - name: healthy-nft-ipv6-preserve
+            path: tests/remote_healthy_nft_ipv6.sh
+          - name: fwmark-policy-routing
+            path: tests/remote_fwmark_policy_routing.sh
+          - name: direct-fallback
+            path: tests/remote_direct_fallback.sh
+          - name: direct-fallback-unmanaged
+            path: tests/remote_direct_fallback_unmanaged.sh
+          - name: unmanaged-routes
+            path: tests/remote_unmanaged_routes.sh
+          - name: route-ownership
+            path: tests/remote_route_ownership.sh
+          - name: quic-nat
+            path: tests/remote_quic_nat.sh
+            carrier: quic
+          - name: quicfull-nat
+            path: tests/remote_quic_nat.sh
+            carrier: quicfull
+          - name: quic-faketcp-nat
+            path: tests/remote_quic_nat.sh
+            carrier: quic-faketcp
+          - name: quicfull-faketcp-nat
+            path: tests/remote_quic_nat.sh
+            carrier: quicfull-faketcp
+    # A stalled namespace test must not consume a runner indefinitely.
+    timeout-minutes: 10
+    env:
+      # Give each concurrent matrix job its own namespace prefix.
+      TINECT_NS_PREFIX: t-${{ github.run_id }}-${{ strategy.job-index }}
+      # Keep work files and status sockets unique across concurrent jobs.
+      WORK: /tmp/tinect-work-${{ github.run_id }}-${{ strategy.job-index }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install network test runtime
+        run: |
+          missing=0
+          for command in conntrack ip ping nft python3 ss strace tc tcpdump timeout; do
+            command -v "$command" >/dev/null 2>&1 || missing=1
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            if ! command -v apt-get >/dev/null 2>&1; then
+              echo "network test runtime is unavailable and apt-get is not installed" >&2
+              exit 1
+            fi
+            sudo -n apt-get update
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              --no-install-recommends \
+              conntrack \
+              coreutils iproute2 iputils-ping nftables python3 strace sudo tcpdump
+          fi
+      - name: Download release test binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: tinect-release-binaries
+          path: /tmp/tinect-release-binaries
+      - name: Prepare release test binaries
+        run: |
+          mkdir -p target/release/examples
+          cp /tmp/tinect-release-binaries/release/tinect target/release/tinect
+          cp /tmp/tinect-release-binaries/release/examples/nat-endpoint target/release/examples/nat-endpoint
+          chmod +x target/release/tinect target/release/examples/nat-endpoint
+      - name: Verify network test runtime
+        run: |
+          command -v conntrack
+          command -v ip
+          command -v ping
+          command -v nft
+          command -v python3
+          command -v ss
+          command -v strace
+          command -v tc
+          command -v tcpdump
+          command -v timeout
+      - name: Run privileged network integration test
+        run: |
+          echo "== ${{ matrix.path }} =="
+          if [[ -n "${{ matrix.carrier || '' }}" ]]; then
+            export CARRIER="${{ matrix.carrier }}"
+          fi
+          if [[ -n "${{ matrix.timing_profile || '' }}" ]]; then
+            export TINECT_TEST_TIMING_PROFILE="${{ matrix.timing_profile }}"
+          fi
+          if [[ "${{ matrix.healthy_nft || false }}" == "true" ]]; then
+            export HEALTHY_NFT_TEST=1
+          fi
+          if [[ "${{ matrix.require_recovery || false }}" == "true" ]]; then
+            export REQUIRE_FEC_RECOVERY=1
+          else
+            export REQUIRE_FEC_RECOVERY=0
+          fi
+          timeout --signal=TERM --kill-after=15s 6m sudo -E bash "${{ matrix.path }}"
+      - name: Collect diagnostics
+        if: always()
+        env:
+          SAFE_NAME: ${{ matrix.name }}-${{ github.run_id }}-${{ strategy.job-index }}
+        run: |
+          diagnostics_dir="/tmp/tinect-ci-${SAFE_NAME}"
+          mkdir -p "$diagnostics_dir"
+          sudo ip netns list 2>/dev/null >"$diagnostics_dir/namespaces.txt" || true
+          sudo ip -br link show 2>/dev/null >"$diagnostics_dir/links.txt" || true
+          sudo nft list ruleset >"$diagnostics_dir/nftables.txt" 2>&1 || true
+          while IFS= read -r log; do
+            relative_path="${log#/tmp/}"
+            destination="$diagnostics_dir/$relative_path"
+            mkdir -p "$(dirname "$destination")"
+            sudo cat "$log" >"$destination" || true
+          done < <(
+            sudo find "$WORK" -type f -name '*.log' \
+              ! -path "$diagnostics_dir/*" -print 2>/dev/null || true
+          )
+          find "$diagnostics_dir" -type f -print \
+            -exec tail -n 200 {} \; || true
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: tinect-${{ matrix.name }}-diagnostics
+          path: /tmp/tinect-ci-${{ matrix.name }}-${{ github.run_id }}-${{ strategy.job-index }}
+          retention-days: 1
+          if-no-files-found: warn
+      - name: Cleanup privileged network resources
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t namespaces < <(
+            sudo -n find /run/netns -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null \
+              | grep -F -- "${TINECT_NS_PREFIX}-" || true
+          )
+          for namespace in "${namespaces[@]}"; do
+            sudo -n ip netns del "$namespace" 2>/dev/null || true
+          done
+          sudo -n rm -rf -- "$WORK"

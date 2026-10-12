@@ -1,0 +1,32 @@
+# Version-control and local development state
+.git
+.gitignore
+.ssh
+.env
+.env.*
+target
+deployments
+*.key
+*.pub
+
+# Repository material not required to compile the image
+AGENTS.md
+README.md
+LICENSE
+docs
+examples
+packaging
+tests
+flake.nix
+flake.lock
+default.nix
+treefmt.nix
+
+# Editor, operating-system, and build-tool artifacts
+.DS_Store
+.direnv
+.idea
+.vscode
+*.swp
+*.swo
+*.tmp

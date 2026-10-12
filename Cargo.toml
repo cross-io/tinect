@@ -1,0 +1,78 @@
+[package]
+name = "tinect"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "A static, policy-driven layer-3 overlay network"
+repository = "https://github.com/cross-io/tinect"
+
+[workspace]
+members = ["crates/tinect-fake-tcp"]
+resolver = "2"
+
+[features]
+# Enables named, invariant-checked timing profiles used only by privileged
+# integration-test binaries. Production builds ignore the opt-in environment
+# variable because this feature is not enabled.
+integration-test-timing = []
+
+[lib]
+name = "tinect"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tinect"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.22.1"
+chacha20poly1305 = "0.11.0"
+clap = { version = "4.6.5", features = ["derive"] }
+curve25519-dalek = "5.0.0"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core", "pkcs8"] }
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
+hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio"] }
+hickory-proto = "0.26.1"
+hkdf = "0.13.0"
+inout = "0.2.2"
+ipnet = { version = "2.12.1", features = ["serde"] }
+libc = "0.2.189"
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = "0.14.8"
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
+sha2 = "0.11.0"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tun = { version = "0.8.14", features = ["async"] }
+x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+tinect-fake-tcp = { path = "crates/tinect-fake-tcp" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-util = "0.3.33"
+mnl = "0.3.1"
+nftnl = { version = "0.9.3", features = ["nftnl-1-2-6"] }
+rtnetlink = "0.21.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pfctl = { git = "https://github.com/ihciah/pfctl-rs.git", rev = "c9b32b7" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[build-dependencies]
+vergen-gix = "10.0.2"
+
+[profile.release]
+# Keep production binaries small while retaining reasonable CI build times.
+lto = "thin"
+strip = "symbols"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }

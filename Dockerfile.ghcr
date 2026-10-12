@@ -1,0 +1,16 @@
+# GHCR release image: release.yml supplies the already-built static binary.
+# No compiler or source tree is included in this image build.
+FROM docker.io/library/alpine:3.24
+
+ARG TARGETARCH
+
+LABEL org.opencontainers.image.title="tinect" \
+      org.opencontainers.image.description="A static, policy-driven layer-3 overlay network" \
+      org.opencontainers.image.source="https://github.com/cross-io/tinect"
+
+COPY dist/tinect-linux-${TARGETARCH} /usr/local/bin/tinect
+
+RUN chmod 0755 /usr/local/bin/tinect
+
+ENTRYPOINT ["tinect"]
+CMD ["--help"]

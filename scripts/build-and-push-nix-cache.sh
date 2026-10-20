@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-# Build Tinect on a Linux builder and publish its closure to the Nix HTTP
-# binary cache. The cache password is read from the environment and is never
-# written to the repository or printed by this script.
+# Build Tinect on a Linux builder and publish the same closure to the private
+# Nix HTTP cache and, when configured, Cachix. Cache credentials are read from
+# the environment and are never written to the repository or printed here.
 
 cache_url="${NIX_CACHE_URL:-https://nix-cache.ihc.im}"
 flake_ref="${NIX_FLAKE_REF:-.}#tinect"
@@ -14,6 +14,7 @@ package_name="${NIX_CACHE_PACKAGE_NAME:-tinect}"
 version_name="${NIX_CACHE_VERSION:-}"
 registration_tags_json="${NIX_CACHE_TAGS_JSON:-}"
 cache_upload_command="${NIX_CACHE_UPLOAD_COMMAND:-nix-cache-upload}"
+cachix_cache_name="${CACHIX_CACHE_NAME:-}"
 
 if ! command -v nix >/dev/null 2>&1; then
   echo "nix is required" >&2
@@ -80,3 +81,13 @@ NIX_CACHE_WRITE_TOKEN="$cache_password" \
     --version "$version_name" \
     "${cache_tag_args[@]}" \
     "$out_path"
+
+if [[ -n "$cachix_cache_name" ]]; then
+  if ! command -v cachix >/dev/null 2>&1; then
+    echo "cachix is required when CACHIX_CACHE_NAME is set" >&2
+    exit 1
+  fi
+
+  echo "Publishing the closure to Cachix cache $cachix_cache_name"
+  cachix push "$cachix_cache_name" "$out_path"
+fi

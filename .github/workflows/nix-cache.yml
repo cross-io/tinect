@@ -54,6 +54,24 @@ jobs:
           extra_nix_config: |
             extra-experimental-features = nix-command flakes
 
+      - name: Verify Cachix token
+        shell: bash
+        env:
+          CACHIX_AUTH_TOKEN_FROM_SECRET: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN_FROM_SECRET" ]]; then
+            echo "CACHIX_AUTH_TOKEN is not configured as a GitHub secret" >&2
+            exit 1
+          fi
+
+      - name: Configure Cachix cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: cross-io
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
       - name: Verify runner system
         shell: bash
         run: |
@@ -91,6 +109,7 @@ jobs:
           NIX_CACHE_URL: https://nix-cache.ihc.im
           NIX_CACHE_UPLOAD_COMMAND: ${{ github.workspace }}/.nix-cache-worker/bin/nix-cache-upload
           NIX_CACHE_WRITE_TOKEN_FROM_SECRET: ${{ secrets.NIX_CACHE_WRITE_TOKEN }}
+          CACHIX_CACHE_NAME: cross-io
           NIX_CACHE_TAGS_JSON: >-
             {"channel":"${{ inputs.channel || 'dev' }}","system":"${{ matrix.system }}"}
         run: |

@@ -30,6 +30,24 @@ On Linux, building from source requires the `libmnl` and `libnftnl` development 
 
 Or use the Nix flake:
 
+The public [`cross-io` Cachix cache](https://app.cachix.org/cache/cross-io#pull) provides binary substitutes for Linux Nix builds. Add these lines to `/etc/nix/nix.conf` (or `~/.config/nix/nix.conf` for a single-user Nix installation):
+
+```conf
+extra-substituters = https://cross-io.cachix.org
+extra-trusted-public-keys = cross-io.cachix.org-1:/W1AzPgeUf/kaqz/XtdkWpIQmoj/9x/oIdgVRnXuP3w=
+```
+
+On NixOS, set the equivalent options in your system configuration:
+
+```nix
+nix.settings.extra-substituters = [ "https://cross-io.cachix.org" ];
+nix.settings.extra-trusted-public-keys = [
+  "cross-io.cachix.org-1:/W1AzPgeUf/kaqz/XtdkWpIQmoj/9x/oIdgVRnXuP3w="
+];
+```
+
+Then build and run Tinect with Nix:
+
 ```sh
 nix build github:cross-io/tinect
 nix run github:cross-io/tinect -- --help

@@ -30,6 +30,24 @@ Linux 源码构建需要 `libmnl`、`libnftnl` 开发库和 `pkg-config`。Nix �
 
 也可以使用 Nix flake：
 
+公共的 [`cross-io` Cachix 缓存](https://app.cachix.org/cache/cross-io#pull)可为 Linux 上的 Nix 构建提供已有的二进制产物。将以下配置加入 `/etc/nix/nix.conf`（单用户 Nix 安装可使用 `~/.config/nix/nix.conf`）：
+
+```conf
+extra-substituters = https://cross-io.cachix.org
+extra-trusted-public-keys = cross-io.cachix.org-1:/W1AzPgeUf/kaqz/XtdkWpIQmoj/9x/oIdgVRnXuP3w=
+```
+
+如果使用 NixOS，在系统配置中设置对应选项：
+
+```nix
+nix.settings.extra-substituters = [ "https://cross-io.cachix.org" ];
+nix.settings.extra-trusted-public-keys = [
+  "cross-io.cachix.org-1:/W1AzPgeUf/kaqz/XtdkWpIQmoj/9x/oIdgVRnXuP3w="
+];
+```
+
+然后使用 Nix 构建或运行 Tinect：
+
 ```sh
 nix build github:cross-io/tinect
 nix run github:cross-io/tinect -- --help
